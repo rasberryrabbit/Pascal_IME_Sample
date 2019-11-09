@@ -22,8 +22,9 @@ type
     procedure Label1Click(Sender: TObject);
   private
     { private declarations }
-    buf : Widestring;
+    buf : Unicodestring;
     LastImeLen : Integer;
+    procedure WMIMENotify(var Msg: TMessage); message WM_IME_NOTIFY;
     procedure WMIMEComposition(var Msg: TMessage); message WM_IME_COMPOSITION;
     procedure WMIMEStartComposition(var Msg: TMessage); message WM_IME_STARTCOMPOSITION;
     //
@@ -35,6 +36,7 @@ type
 
 var
   Form1: TForm1;
+  buffer: array[0..200] of WideChar;
 
 implementation
 
@@ -75,51 +77,97 @@ begin
   ActiveControl:=nil;
 end;
 
-procedure TForm1.WMIMEComposition(var Msg: TMessage);
+procedure TForm1.WMIMENotify(var Msg: TMessage);
+const
+  IMN_OPENCANDIDATE_CH = 269;
+  IMN_CLOSECANDIDATE_CH = 270;
 var
-   imc : HIMC;
-   icode, len : Integer;
-   p : PWideChar;
+  candiform: CANDIDATEFORM;
+  imc: HIMC;
+  cPos: TPoint;
+begin
+  case Msg.WParam of
+    //IMN_SETOPENSTATUS:
+    //  UpdateImeWindow(Sender);
+    { show candidate window. it need japanese and chinese input method }
+    IMN_OPENCANDIDATE_CH,
+    IMN_OPENCANDIDATE:
+      begin
+        imc:=ImmGetContext(Form1.Handle);
+        try
+          if imc<>0 then
+          begin
+            if GetCaretPos(cPos) then
+            begin
+              candiform.dwIndex:=0;
+              candiform.dwStyle:=CFS_FORCE_POSITION;
+
+              candiform.ptCurrentPos.X:=cPos.X;
+              candiform.ptCurrentPos.Y:=cPos.Y+Form1.Canvas.TextHeight('g')+1;
+
+              ImmSetCandidateWindow(imc,@candiform);
+            end;
+          end;
+        finally
+          ImmReleaseContext(Form1.Handle,imc);
+        end;
+      end;
+  end;
+end;
+
+procedure TForm1.WMIMEComposition(var Msg: TMessage);
+const
+  IME_COMPFLAG = GCS_COMPSTR or GCS_COMPATTR or GCS_CURSORPOS;
+  IME_RESULTFLAG = GCS_RESULTCLAUSE or GCS_RESULTSTR;
+var
+  IMC: HIMC;
+  imeCode, imeReadCode, len, ImmGCode, astart, alen: Integer;
 begin
   AddMessages(Msg);
-   if Msg.lParam and GCS_COMPSTR <> 0 then
-      icode := GCS_COMPSTR
-      else if Msg.lParam and GCS_RESULTSTR <> 0 then
-           icode := GCS_RESULTSTR
-           else
-               icode := 0;
-   // check compositon state
-   if icode<>0 then begin
-     imc := ImmGetContext(Handle);
-     try
-        len := ImmGetCompositionStringW(imc,icode,nil,0);
-        GetMem(p,len+2);
-        try
-           // get compositon string
-           ImmGetCompositionStringW(imc,icode,p,len);
-           len := len shr 1;
-           p[len]:=#0;
-           // delete previous inputed strings
-           if LastImeLen>0 then
-              if Length(buf)>0 then
-                 Delete(buf,Length(buf)-LastImeLen+1,LastImeLen);
-           buf:=buf+p;
-           // if IME return Result string, don't delete buffer
-           if icode=GCS_RESULTSTR then
-              LastImeLen:=0
-              else LastImeLen:=len;
-           // output to controls, must be utf-8 string
-           PaintBox1.Canvas.TextOut(1,1,UTF8Encode(buf+'  '));
-        finally
-          FreeMem(p);
+  imeCode:=Msg.lParam and (IME_COMPFLAG or IME_RESULTFLAG);
+  { check compositon state }
+  if imeCode<>0 then
+  begin
+    IMC := ImmGetContext(Form1.Handle);
+    try
+       ImmGCode:=Msg.wParam;
+        { check escape key code }
+        if ImmGCode<>$1b then
+        begin
+          { for janpanese IME, process result and composition separately.
+            It comes together. Caret position doesn't implemented.
+            Candidate window need caret position for showing window. }
+          { delete last char in buffer }
+          if LastImeLen>0 then
+            if Length(buf)>0 then
+              Delete(buf,Length(buf)-LastImeLen+1,LastImeLen);
+          { insert result string }
+          if imecode and IME_RESULTFLAG<>0 then
+          begin
+            len:=ImmGetCompositionStringW(IMC,GCS_RESULTSTR,@buffer[0],sizeof(buffer)-sizeof(WideChar));
+            if len>0 then
+              len := len shr 1;
+            buffer[len]:=#0;
+            buf:=buf+buffer;
+            LastImeLen:=0;
+          end;
+          { insert composition string }
+          if imeCode and IME_COMPFLAG<>0 then begin
+            len:=ImmGetCompositionStringW(IMC,GCS_COMPSTR,@buffer[0],sizeof(buffer)-sizeof(WideChar));
+            if len>0 then
+              len := len shr 1;
+            buffer[len]:=#0;
+            buf:=buf+buffer;
+            LastImeLen:=len;
+          end;
+          { print string }
+          PaintBox1.Canvas.TextOut(1,1,UTF8Encode(buf+'  '));
         end;
-
-     finally
-       ImmReleaseContext(Handle,imc);
-     end;
-   end;
-   // disable IME Compositoin window
-   Msg.Result:=-1;
+    finally
+      ImmReleaseContext(Form1.Handle,IMC);
+    end;
+  end;
+  Msg.Result:= -1;
 end;
 
 procedure TForm1.WMIMEStartComposition(var Msg: TMessage);
